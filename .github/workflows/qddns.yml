@@ -202,18 +202,15 @@ jobs:
           ln -s "$PWD/dl" openwrt-sdk/dl
 
       - name: Build qddns packages inside SDK
+        id: build
         run: |
-          set -ex
+          set -eo pipefail
           cd sdk/openwrt-sdk
           export HOME="$HOME"
-
-          # 让 rust 编译时用的 cargo 缓存指向外面的 ~/.cargo
-          # SDK 的 rust-package.mk 会将 CARGO_HOME 指向 dl/ 或 ~/.cargo? 具体看情况
-          # 显式设置更稳
           export CARGO_HOME="$HOME/.cargo"
           mkdir -p "$CARGO_HOME"
 
-          # 1. 更新并安装默认 feeds（luci-base / packages/lang/rust 等）
+          # 1. feeds: update + install 默认 (luci-base, packages/lang/rust …)
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -222,14 +219,45 @@ jobs:
           ./scripts/feeds update qddns
           ./scripts/feeds install -a -p qddns
 
-          # 3. 生成默认配置，确保 qddns 与 luci-app-qddns 两个包被编入
+          # 3. 第一次 defconfig
           make defconfig
 
-          # 4. 编译 qddns 后端（Rust）和 luci-app-qddns 前端
-          make package/qddns/compile -j"$(nproc)" V=sc
-          make package/luci-app-qddns/compile -j"$(nproc)" V=sc
+          # 4. 强制选 qddns 和 luci-app-qddns 进 .config，处理依赖时的默认没选
+          #    先 unset 掉 "is not set" 行，再追加 =y，最后再 defconfig 让它把依赖补齐
+          sed -i '/^# CONFIG_PACKAGE_qddns /d' .config
+          sed -i '/^CONFIG_PACKAGE_qddns=/d' .config
+          sed -i '/^# CONFIG_PACKAGE_luci-app-qddns /d' .config
+          sed -i '/^CONFIG_PACKAGE_luci-app-qddns=/d' .config
+          echo 'CONFIG_PACKAGE_qddns=y'          >> .config
+          echo 'CONFIG_PACKAGE_luci-app-qddns=y' >> .config
+          make defconfig
 
-          # 5. 拷贝产物
+          # 5. 诊断: 确认包已被选入
+          echo "---- .config 中 qddns 相关项："
+          grep -E "^(CONFIG_PACKAGE_(qddns|luci-app-qddns))" .config || {
+            echo "::error::defconfig 没有选中 qddns / luci-app-qddns，不能编译"; exit 1
+          }
+
+          # 6. 真正的编译 —— 重定向到 build.log，出错时 tail 上传 artifact 看
+          BUILDLOG="$GITHUB_WORKSPACE/build.log"
+          : > "$BUILDLOG"
+
+          echo "==== 编译 qddns (Rust) ====" | tee -a "$BUILDLOG"
+          # Rust 编译 -j1 V=s 输出清晰，方便排错
+          if ! make package/qddns/compile -j1 V=s 2>&1 | tee -a "$BUILDLOG"; then
+            echo "::error::qddns 编译失败, 见 tail of build.log (last 300 lines)"
+            tail -n 300 "$BUILDLOG" >&2 || true
+            exit 1
+          fi
+
+          echo "==== 编译 luci-app-qddns (LuCI page) ====" | tee -a "$BUILDLOG"
+          if ! make package/luci-app-qddns/compile -j"$(nproc)" V=sc 2>&1 | tee -a "$BUILDLOG"; then
+            echo "::error::luci-app-qddns 编译失败, tail of build.log (last 300 lines)"
+            tail -n 300 "$BUILDLOG" >&2 || true
+            exit 1
+          fi
+
+          # 7. 拷贝产物
           mkdir -p "$GITHUB_WORKSPACE/output"
           find bin -name "*.${{ steps.param.outputs.pkg_ext }}" -print0 | \
             while IFS= read -r -d "" f; do
@@ -239,13 +267,32 @@ jobs:
       - name: List artifacts
         run: ls -la output/
 
-      - name: Upload artifacts
+      - name: Package diagnostics (.config, build.log, feeds.conf)
+        if: always()
+        run: |
+          mkdir -p diag
+          [ -f build.log ]                          && cp -v build.log                          diag/
+          [ -f sdk/openwrt-sdk/.config ]            && cp -v sdk/openwrt-sdk/.config           diag/dot.config
+          [ -f sdk/openwrt-sdk/feeds.conf ]         && cp -v sdk/openwrt-sdk/feeds.conf        diag/
+          [ -f sdk/openwrt-sdk/feeds.conf.default ] && cp -v sdk/openwrt-sdk/feeds.conf.default diag/
+          ls -la diag/ || true
+
+      - name: Upload artifacts (packages)
         uses: actions/upload-artifact@v4
         with:
           name: qddns-${{ matrix.format }}-${{ matrix.target }}
           path: output/*
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload artifacts (diagnostics)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qddns-${{ matrix.format }}-${{ matrix.target }}-diag
+          path: diag/*
+          if-no-files-found: ignore
+          retention-days: 14
 
   summary:
     name: Summary
