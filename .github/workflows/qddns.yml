@@ -8,23 +8,23 @@ name: Build qddns (IPK + APK)
 # 说明：
 #   - 本仓库不需要 fork 上游源码，直接通过 OpenWrt feeds 引用
 #     https://github.com/qimaoww/luci-app-qddns.git
-#   - IPK 走 OpenWrt 23.05 SDK（旧包格式）
-#   - APK 走 OpenWrt SNAPSHOT SDK（新包格式，24.10+ 默认）
-#   - 使用官方 openwrt/sdk Docker 镜像，免本地搭建编译环境
+#   - IPK 走 OpenWrt 23.05 SDK（旧 .ipk 包格式）
+#   - APK 走 OpenWrt SNAPSHOT SDK（新 .apk 包格式，24.10+ / snapshot 默认）
+#   - 直接从 downloads.openwrt.org 拉取官方 SDK tarball（不依赖 Docker Hub 镜像）
 
 on:
   workflow_dispatch:
     inputs:
       targets:
-        description: 'Space-separated targets, e.g. "armvirt-64 x86-64"'
+        description: 'Targets (target-subtarget form, space separated). e.g. "armvirt-64 x86-64"'
         required: false
         default: 'armvirt-64'
       ipk_sdk_tag:
-        description: 'OpenWrt SDK tag for IPK build'
+        description: 'OpenWrt release tag for IPK (.ipk)'
         required: false
         default: '23.05.5'
       apk_sdk_tag:
-        description: 'OpenWrt SDK tag for APK build (snapshot/24.10.x)'
+        description: 'OpenWrt release tag for APK (.apk). Use "snapshot" or "24.10.x"'
         required: false
         default: 'snapshot'
   push:
@@ -33,7 +33,6 @@ on:
     - cron: '30 2 * * 1'
 
 env:
-  # 上游源码仓库（不 fork，仅引用）
   QDDNS_FEED_URL: https://github.com/qimaoww/luci-app-qddns.git
   QDDNS_FEED_BRANCH: main
 
@@ -69,53 +68,140 @@ jobs:
           - format: apk
             sdk_tag_from: apk_sdk_tag
     steps:
-      - name: Resolve SDK tag
-        id: tag
+      - name: Resolve parameters
+        id: param
         run: |
+          set -ex
           case "${{ matrix.sdk_tag_from }}" in
-            ipk_sdk_tag)  echo "tag=${{ needs.prepare.outputs.ipk_sdk_tag }}" >> "$GITHUB_OUTPUT" ;;
-            apk_sdk_tag)  echo "tag=${{ needs.prepare.outputs.apk_sdk_tag }}" >> "$GITHUB_OUTPUT" ;;
+            ipk_sdk_tag) SDK_TAG="${{ needs.prepare.outputs.ipk_sdk_tag }}" ;;
+            apk_sdk_tag) SDK_TAG="${{ needs.prepare.outputs.apk_sdk_tag }}" ;;
           esac
+          TARGET="${{ matrix.target }}"
 
-      - name: Prepare output / cache directories
+          # target-subtarget → target/subtarget 目录（downloads.openwrt.org 的目录结构）
+          # 常见：armvirt-64  → targets/armvirt/64/
+          #       x86-64      → targets/x86/64/
+          #       ramips-mt7621 → targets/ramips/mt7621/
+          # （把第一个 `-` 拆成 target 和 subtarget，对绝大多数 target 正确
+          DIR_TARGET="${TARGET%%-*}"
+          DIR_SUBTARGET="${TARGET#*-}"
+
+          # snapshot 没有 release 前缀目录，其它 tag
+          if [ "$SDK_TAG" = "snapshot" ]; then
+            BASE_URL="https://downloads.openwrt.org/snapshots/targets/${DIR_TARGET}/${DIR_SUBTARGET}"
+            PKG_EXT="apk"
+          else
+            BASE_URL="https://downloads.openwrt.org/releases/${SDK_TAG}/targets/${DIR_TARGET}/${DIR_SUBTARGET}"
+            PKG_EXT="ipk"
+          fi
+
+          echo "sdk_tag=$SDK_TAG"    >> "$GITHUB_OUTPUT"
+          echo "dir_target=$DIR_TARGET" >> "$GITHUB_OUTPUT"
+          echo "dir_subtarget=$DIR_SUBTARGET" >> "$GITHUB_OUTPUT"
+          echo "base_url=$BASE_URL"  >> "$GITHUB_OUTPUT"
+          echo "pkg_ext=$PKG_EXT"   >> "$GITHUB_OUTPUT"
+
+      - name: Install build prerequisites
         run: |
-          mkdir -p output cargo-cache dl-cache
-          chmod -R 777 output cargo-cache dl-cache
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl file gawk gettext git \
+            libncurses5-dev libssl-dev python3 python3-distutils \
+            rsync subversion swig unzip wget xsltproc zstd xz-utils
 
-      - name: Build with OpenWrt SDK
+      - name: Discover SDK filename (handles varying GCC versions / compression)
+        id: sdk
         run: |
-          docker run --rm \
-            -v "$PWD/output:/output" \
-            -v "$PWD/cargo-cache:/home/build/.cargo" \
-            -v "$PWD/dl-cache:/home/build/openwrt/dl" \
-            -e FEED_URL="${QDDNS_FEED_URL}" \
-            -e FEED_BRANCH="${QDDNS_FEED_BRANCH}" \
-            openwrt/sdk:${{ matrix.target }}-${{ steps.tag.outputs.tag }} \
-            bash -c '
-              set -ex
-              cd /home/build/openwrt
+          set -ex
+          SHA_URL="${{ steps.param.outputs.base_url }}/sha256sums"
+          SUMS=$(curl -fsSL "$SHA_URL")
+          # sha256sums 里每行格式: <hash>  *<filename>  或  <hash>  <filename>
+          SDK_FILE=$(echo "$SUMS" \
+            | grep -E 'openwrt-sdk-.*\.Linux-x86_64\.tar\.[a-z0-9]+' \
+            | awk '{print $2}' \
+            | sed 's/^\*//' \
+            | head -n1)
+          if [ -z "$SDK_FILE" ]; then
+            echo "::error::Could not find SDK tarball in $SHA_URL"
+            exit 1
+          fi
+          SDK_SHA=$(echo "$SUMS" | grep "openwrt-sdk-" | awk '{print $1}' | head -n1)
+          echo "file=$SDK_FILE" >> "$GITHUB_OUTPUT"
+          echo "url=${{ steps.param.outputs.base_url }}/${SDK_FILE}" >> "$GITHUB_OUTPUT"
+          echo "sha=$SDK_SHA" >> "$GITHUB_OUTPUT"
 
-              # 1. 更新并安装默认 feeds（luci-base / packages/lang/rust 等）
-              ./scripts/feeds update -a
-              ./scripts/feeds install -a
+      - name: Cache SDK dl directory
+        uses: actions/cache@v4
+        with:
+          path: sdk/dl
+          key: sdk-dl-${{ matrix.target }}-${{ matrix.format }}-${{ steps.sdk.outputs.sha }}
+          restore-keys: |
+            sdk-dl-${{ matrix.target }}-${{ matrix.format }}-
 
-              # 2. 添加上游 qddns feed
-              echo "src-git qddns ${FEED_URL};${FEED_BRANCH}" >> feeds.conf
-              ./scripts/feeds update qddns
-              ./scripts/feeds install -a -p qddns
+      - name: Cache cargo registry / git index
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ matrix.format }}-${{ steps.sdk.outputs.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ matrix.target }}-${{ matrix.format }}-
 
-              # 3. 生成默认配置
-              make defconfig
+      - name: Download & unpack SDK
+        run: |
+          set -ex
+          mkdir -p sdk/dl
+          cd sdk
+          curl -fSL --retry 3 -o sdk.tar "${{ steps.sdk.outputs.url }}"
+          case "${{ steps.sdk.outputs.file }}" in
+            *.tar.zst) zstd -d --rm -c sdk.tar | tar xf - ;;
+            *.tar.xz)  xz -d -c sdk.tar | tar xf - ;;
+            *.tar.gz)  tar xzf sdk.tar ;;
+            *)         echo "unknown ext" ; exit 1 ;;
+          esac
+          rm -f sdk.tar
+          # rename the versioned dirname → sdk/
+          DIR=$(find . -maxdepth 1 -type d -name "openwrt-sdk-*" -print | head -n1)
+          mv "$DIR" openwrt-sdk
+          # 预 dl 缓存映射到 SDK/dl
+          rm -rf openwrt-sdk/dl
+          ln -s "$PWD/dl" openwrt-sdk/dl
 
-              # 4. 编译 qddns 后端（Rust）和 luci-app-qddns 前端
-              make package/qddns/compile -j"$(nproc)" V=sc
-              make package/luci-app-qddns/compile -j"$(nproc)" V=sc
+      - name: Build qddns packages inside SDK
+        run: |
+          set -ex
+          cd sdk/openwrt-sdk
+          export HOME="$HOME"
 
-              # 5. 拷贝产物到 /output
-              find bin \( -name "*.ipk" -o -name "*.apk" \) -print0 | while IFS= read -r -d "" f; do
-                cp -v "$f" /output/
-              done
-            '
+          # 让 rust 编译时用的 cargo 缓存指向外面的 ~/.cargo
+          # SDK 的 rust-package.mk 会将 CARGO_HOME 指向 dl/ 或 ~/.cargo? 具体看情况
+          # 显式设置更稳
+          export CARGO_HOME="$HOME/.cargo"
+          mkdir -p "$CARGO_HOME"
+
+          # 1. 更新并安装默认 feeds（luci-base / packages/lang/rust 等）
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          # 2. 添加上游 qddns feed（不 fork 上游仓库，直接引用）
+          echo "src-git qddns ${QDDNS_FEED_URL};${QDDNS_FEED_BRANCH}" >> feeds.conf
+          ./scripts/feeds update qddns
+          ./scripts/feeds install -a -p qddns
+
+          # 3. 生成默认配置，确保 qddns 与 luci-app-qddns 两个包被编入
+          make defconfig
+
+          # 4. 编译 qddns 后端（Rust）和 luci-app-qddns 前端
+          make package/qddns/compile -j"$(nproc)" V=sc
+          make package/luci-app-qddns/compile -j"$(nproc)" V=sc
+
+          # 5. 拷贝产物
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          find bin -name "*.${{ steps.param.outputs.pkg_ext }}" -print0 | \
+            while IFS= read -r -d "" f; do
+              cp -v "$f" "$GITHUB_WORKSPACE/output/"
+            done
 
       - name: List artifacts
         run: ls -la output/
