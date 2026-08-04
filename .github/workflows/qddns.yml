@@ -16,9 +16,9 @@ on:
   workflow_dispatch:
     inputs:
       targets:
-        description: 'Targets (target-subtarget form, space separated). e.g. "armvirt-64 x86-64"'
+        description: 'Targets (target-subtarget form, space separated). e.g. "x86-64 armsr-armv8 ramips-mt7621 bcm27xx-bcm2711"'
         required: false
-        default: 'armvirt-64'
+        default: 'x86-64'
       ipk_sdk_tag:
         description: 'OpenWrt release tag for IPK (.ipk)'
         required: false
@@ -47,7 +47,7 @@ jobs:
     steps:
       - id: set
         run: |
-          INPUT="${{ github.event.inputs.targets || 'armvirt-64' }}"
+          INPUT="${{ github.event.inputs.targets || 'x86-64' }}"
           TARGETS=$(echo "$INPUT" | tr ' ' '\n' | jq -R . | jq -sc .)
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
           echo "ipk_sdk_tag=${{ github.event.inputs.ipk_sdk_tag || '23.05.5' }}" >> "$GITHUB_OUTPUT"
@@ -68,10 +68,10 @@ jobs:
           - format: apk
             sdk_tag_from: apk_sdk_tag
     steps:
-      - name: Resolve parameters
+      - name: Resolve parameters & validate target URL
         id: param
         run: |
-          set -ex
+          set -eo pipefail
           case "${{ matrix.sdk_tag_from }}" in
             ipk_sdk_tag) SDK_TAG="${{ needs.prepare.outputs.ipk_sdk_tag }}" ;;
             apk_sdk_tag) SDK_TAG="${{ needs.prepare.outputs.apk_sdk_tag }}" ;;
@@ -79,27 +79,60 @@ jobs:
           TARGET="${{ matrix.target }}"
 
           # target-subtarget → target/subtarget 目录（downloads.openwrt.org 的目录结构）
-          # 常见：armvirt-64  → targets/armvirt/64/
-          #       x86-64      → targets/x86/64/
-          #       ramips-mt7621 → targets/ramips/mt7621/
-          # （把第一个 `-` 拆成 target 和 subtarget，对绝大多数 target 正确
+          # 常见：x86-64          → targets/x86/64/
+          #       armsr-armv8     → targets/armsr/armv8/
+          #       ramips-mt7621   → targets/ramips/mt7621/
+          #       bcm27xx-bcm2711 → targets/bcm27xx/bcm2711/
+          # （把第一个 `-` 拆成 target 和 subtarget，对绝大多数 target 正确）
           DIR_TARGET="${TARGET%%-*}"
           DIR_SUBTARGET="${TARGET#*-}"
 
-          # snapshot 没有 release 前缀目录，其它 tag
           if [ "$SDK_TAG" = "snapshot" ]; then
-            BASE_URL="https://downloads.openwrt.org/snapshots/targets/${DIR_TARGET}/${DIR_SUBTARGET}"
+            RELEASE_BASE="https://downloads.openwrt.org/snapshots"
             PKG_EXT="apk"
           else
-            BASE_URL="https://downloads.openwrt.org/releases/${SDK_TAG}/targets/${DIR_TARGET}/${DIR_SUBTARGET}"
+            RELEASE_BASE="https://downloads.openwrt.org/releases/${SDK_TAG}"
             PKG_EXT="ipk"
           fi
+          BASE_URL="${RELEASE_BASE}/targets/${DIR_TARGET}/${DIR_SUBTARGET}"
+          SHA_URL="${BASE_URL}/sha256sums"
 
-          echo "sdk_tag=$SDK_TAG"    >> "$GITHUB_OUTPUT"
-          echo "dir_target=$DIR_TARGET" >> "$GITHUB_OUTPUT"
+          # 先 HEAD 探测 URL 是否存在，避免出现 404 时输出不清晰
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$SHA_URL" || true)
+          if [ "$HTTP_CODE" != "200" ]; then
+            {
+              echo "::error::Target ${{ matrix.target }} not found for SDK tag=${SDK_TAG} (HTTP ${HTTP_CODE} at ${SHA_URL})."
+              echo ""
+              echo "Hint: OpenWrt 23.05+ 已经把 armvirt 重命名为 armsr (armvirt-64 → armsr-armv8)。"
+              echo "      Common 64-bit targets: x86-64, armsr-armv8, rockchip-armv8, mediatek-filogic, bcm27xx-bcm2711, ipq807x-generic."
+              echo ""
+              echo "Available targets on downloads.openwrt.org for tag=${SDK_TAG}:"
+              TGT_LIST_URL="${RELEASE_BASE}/targets/"
+              TARGETS=$(curl -fsSL "$TGT_LIST_URL" 2>/dev/null \
+                | grep -oE 'href="[A-Za-z0-9_-]+/"' \
+                | sed -e 's/^href="//' -e 's|"/$||' \
+                | sort -u)
+              for t in $TARGETS; do
+                SUBTGT_URL="${RELEASE_BASE}/targets/${t}/"
+                SUBS=$(curl -fsSL "$SUBTGT_URL" 2>/dev/null \
+                  | grep -oE 'href="[A-Za-z0-9_.-]+/"' \
+                  | sed -e 's/^href="//' -e 's|"/$||' \
+                  | sort -u)
+                for s in $SUBS; do
+                  echo "  ${t}-${s}"
+                done
+              done
+            } > /tmp/errmsg.txt 2>&1
+            cat /tmp/errmsg.txt
+            exit 1
+          fi
+
+          echo "sdk_tag=$SDK_TAG"         >> "$GITHUB_OUTPUT"
+          echo "release_base=$RELEASE_BASE" >> "$GITHUB_OUTPUT"
+          echo "dir_target=$DIR_TARGET"    >> "$GITHUB_OUTPUT"
           echo "dir_subtarget=$DIR_SUBTARGET" >> "$GITHUB_OUTPUT"
-          echo "base_url=$BASE_URL"  >> "$GITHUB_OUTPUT"
-          echo "pkg_ext=$PKG_EXT"   >> "$GITHUB_OUTPUT"
+          echo "base_url=$BASE_URL"       >> "$GITHUB_OUTPUT"
+          echo "pkg_ext=$PKG_EXT"         >> "$GITHUB_OUTPUT"
 
       - name: Install build prerequisites
         run: |
