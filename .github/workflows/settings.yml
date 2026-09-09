@@ -42,7 +42,7 @@ jobs:
       - name: Prepare package
         run: |
           mkdir -p openwrt-sdk/package/luci-app-settings
-          git clone https://github.com/LQ44AP/luci-app-settings \
+          git clone https://github.com/lyl2dora/luci-app-settings \
             openwrt-sdk/package/luci-app-settings
 
       - name: Build package
