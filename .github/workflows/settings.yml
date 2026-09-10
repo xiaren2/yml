@@ -62,9 +62,9 @@ jobs:
             -name "iptv-scan*.ipk" -o \
             -name "iptv-scan*.apk" -o \
             -name "luci-app-settings*.ipk" -o \
-            -name "luci-i18n-iptv-scan*.ipk" -o \
+            -name "luci-i18n-settings*.ipk" -o \
             -name "luci-app-settings*.apk" -o \
-            -name "luci-i18n-iptv-scan*.apk" \
+            -name "luci-i18n-settings*.apk" \
             \) -exec cp -v {} packages-staging/${{ matrix.name }}/ \;
 
       - name: Upload packages
