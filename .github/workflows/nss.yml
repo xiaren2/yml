@@ -1,4 +1,4 @@
-name: Build luci-app-nss Multi-Arch 
+name: Build luci-app-aiassist Multi-Arch 
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
             sdk_url: "https://downloads.openwrt.org/releases/23.05.0/targets/mediatek/filogic/openwrt-sdk-23.05.0-mediatek-filogic_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
             extract_cmd: "tar -xJf"
 
-    name: Build luci-app-nss (${{ matrix.name }})
+    name: Build luci-app-aiassist (${{ matrix.name }})
 
     steps:
       - name: Install dependencies
@@ -41,9 +41,9 @@ jobs:
       # ✅ 唯一改动：直接用别人仓库，不碰自己 repo
       - name: Prepare package
         run: |
-          mkdir -p openwrt-sdk/package/luci-app-nss
-          git clone https://github.com/tsg2k2/luci-app-nss \
-            openwrt-sdk/package/luci-app-nss
+          mkdir -p openwrt-sdk/package/luci-app-aiassist
+          git clone https://github.com/yyyyy114514/luci-app-aiassist \
+            openwrt-sdk/package/luci-app-aiassist
 
       - name: Build package
         working-directory: openwrt-sdk
@@ -51,7 +51,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           make defconfig
-          make package/luci-app-nss/compile V=s || true
+          make package/luci-app-aiassist/compile V=s || true
 
       - name: Copy packages to staging
         shell: bash
@@ -59,12 +59,12 @@ jobs:
           shopt -s globstar
           mkdir -p packages-staging/${{ matrix.name }}
           find openwrt-sdk/bin/packages -type f \( \
-            -name "nss*.ipk" -o \
-            -name "nss*.apk" -o \
-            -name "luci-app-nss*.ipk" -o \
-            -name "luci-i18n-nss*.ipk" -o \
-            -name "luci-app-nss*.apk" -o \
-            -name "luci-i18n-nss*.apk" \
+            -name "aiassist*.ipk" -o \
+            -name "aiassist*.apk" -o \
+            -name "luci-app-aiassist*.ipk" -o \
+            -name "luci-i18n-aiassist*.ipk" -o \
+            -name "luci-app-aiassist*.apk" -o \
+            -name "luci-i18n-aiassist*.apk" \
             \) -exec cp -v {} packages-staging/${{ matrix.name }}/ \;
 
       - name: Upload packages
@@ -78,8 +78,8 @@ jobs:
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "luci-app-nss"
-          name: "luci-app-nss"
+          tag_name: "luci-app-aiassist"
+          name: "luci-app-aiassist"
           draft: false
           prerelease: false
           files: packages-staging/${{ matrix.name }}/*
