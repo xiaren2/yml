@@ -36,15 +36,14 @@ jobs:
           sudo apt-get install -y \
             build-essential ccache fastjar file g++ gawk gettext git libelf-dev \
             libncurses5-dev libncursesw5-dev libssl-dev python3 python3-pip \
-            python3-setuptools rsync unzip wget zlib1g-dev xz-utils zstd
+            python3-setuptools rsync unzip wget zlib1g-dev xz-utils zstd \
+            coreutils  # ✅ 添加 coreutils 提供 GNU install 命令
 
       - name: Download and extract OpenWrt SDK
         run: |
           wget ${{ matrix.sdk_url }} -O sdk-archive
-          # 先检查文件完整性
           file sdk-archive
           ls -lh sdk-archive
-          # 直接解压到目标目录，避免管道问题
           mkdir -p openwrt-sdk
           ${{ matrix.extract_cmd }} sdk-archive -C openwrt-sdk --strip-components=1
           echo "SDK extracted successfully"
@@ -58,7 +57,6 @@ jobs:
           git remote add origin https://github.com/kiddin9/op-packages.git
           git config core.sparseCheckout true
           echo "luci-app-ap-modem" > .git/info/sparse-checkout
-          # ✅ 关键修复：kiddin9/op-packages 的主分支是 main，不是 master
           git pull --depth 1 origin main
 
       - name: Build package
@@ -72,7 +70,7 @@ jobs:
       - name: Debug - List all built packages
         shell: bash
         run: |
-          echo "=== Searching for any ipk/apk files ==="
+          echo "=== Searching for any package files (.ipk or .apk) ==="
           find openwrt-sdk/bin -type f \( -name "*.ipk" -o -name "*.apk" \) 2>/dev/null | head -50 || echo "No packages found"
           echo ""
           echo "=== Bin directory structure ==="
@@ -84,7 +82,7 @@ jobs:
           shopt -s globstar
           mkdir -p packages-staging/${{ matrix.name }}
           
-          # 多种可能的命名模式
+          # ✅ 同时搜索 .ipk 和 .apk 格式
           PATTERNS=(
             "*ap-modem*"
             "*ap_modem*"
@@ -93,21 +91,21 @@ jobs:
             "*luci-app-modem*"
           )
           
-          FOUND=false
           for pattern in "${PATTERNS[@]}"; do
-            results=$(find openwrt-sdk/bin -type f -name "$pattern" 2>/dev/null)
-            if [ -n "$results" ]; then
-              echo "$results" | while read -r file; do
-                cp -v "$file" packages-staging/${{ matrix.name }}/
-                FOUND=true
-              done
-            fi
+            # 搜索 .ipk 文件
+            find openwrt-sdk/bin -type f -name "$pattern.ipk" 2>/dev/null | while read -r file; do
+              cp -v "$file" packages-staging/${{ matrix.name }}/
+            done
+            # 搜索 .apk 文件
+            find openwrt-sdk/bin -type f -name "$pattern.apk" 2>/dev/null | while read -r file; do
+              cp -v "$file" packages-staging/${{ matrix.name }}/
+            done
           done
           
-          # 如果没找到特定包，复制所有包用于调试
+          # 如果没找到，复制所有包用于调试
           if [ ! "$(ls -A packages-staging/${{ matrix.name }} 2>/dev/null)" ]; then
-            echo "⚠️ No ap-modem packages found! Copying ALL ipk for debugging..."
-            find openwrt-sdk/bin -type f -name "*.ipk" -exec cp -v {} packages-staging/${{ matrix.name }}/ \; 2>/dev/null || true
+            echo "⚠️ No ap-modem packages found! Copying ALL packages for debugging..."
+            find openwrt-sdk/bin -type f \( -name "*.ipk" -o -name "*.apk" \) -exec cp -v {} packages-staging/${{ matrix.name }}/ \; 2>/dev/null || true
           fi
           
           echo "=== Files in staging ==="
