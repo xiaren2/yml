@@ -16,22 +16,13 @@ jobs:
           - name: "qualcommax-ipq60xx-snapshot"
             sdk_url: "https://mirror-03.infra.openwrt.org/snapshots/targets/qualcommax/ipq60xx/openwrt-sdk-qualcommax-ipq60xx_gcc-15.3.0_musl.Linux-x86_64.tar.zst"
             extract_cmd: "tar -I zstd -xf"
-          - name: "mediatek-filogic-24.10.0"
-            # ✅ 正确：这是 SDK，不是 toolchain！
-            sdk_url: "https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic/openwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-            # ✅ 正确：.tar.zst 要用 zstd 解压
-            extract_cmd: "tar -I zstd -xf"
+          - name: "mediatek-filogic-23.05.0"
+            sdk_url: "https://downloads.openwrt.org/releases/23.05.0/targets/mediatek/filogic/openwrt-sdk-23.05.0-mediatek-filogic_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+            extract_cmd: "tar -xJf"
 
     name: Build luci-app-ap-modem (${{ matrix.name }})
 
     steps:
-      - name: Free disk space
-        run: |
-          df -h
-          sudo apt-get clean
-          docker system prune -af --volumes || true
-          df -h
-
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -40,38 +31,20 @@ jobs:
             libncurses5-dev libncursesw5-dev libssl-dev python3 python3-pip \
             python3-setuptools rsync unzip wget zlib1g-dev xz-utils zstd
 
-      - name: Download and extract OpenWrt SDK
+      - name: Download OpenWrt SDK
         run: |
           wget ${{ matrix.sdk_url }} -O sdk-archive
-          file sdk-archive
-          ls -lh sdk-archive
-          mkdir -p openwrt-sdk
-          ${{ matrix.extract_cmd }} sdk-archive -C openwrt-sdk --strip-components=1
-          echo "SDK extracted successfully"
-          ls -la openwrt-sdk/
+          ${{ matrix.extract_cmd }} sdk-archive
+          SDK_DIR=$(tar -tf sdk-archive | head -1 | cut -f1 -d"/")
+          mv "$SDK_DIR" openwrt-sdk
 
-      - name: Checkout luci-app-ap-modem from kiddin9/op-packages
+      # ★ 唯一改动：clone 别人仓库，取 luci-app-ap-modem 子目录
+      - name: Prepare package (from dotywrt/dotycat-package)
         run: |
           mkdir -p openwrt-sdk/package/luci-app-ap-modem
-          cd openwrt-sdk/package/luci-app-ap-modem
-          git init
-          git remote add origin https://github.com/kiddin9/op-packages.git
-          git config core.sparseCheckout true
-          echo "luci-app-ap-modem" > .git/info/sparse-checkout
-          git pull --depth 1 origin main
-
-      - name: Fix version format for snapshot SDK
-        shell: bash
-        run: |
-          PKG_DIR="openwrt-sdk/package/luci-app-ap-modem/luci-app-ap-modem"
-          if [ -f "$PKG_DIR/Makefile" ]; then
-            echo "=== Original Makefile version lines ==="
-            grep -E "^PKG_VERSION|^PKG_RELEASE" "$PKG_DIR/Makefile" || true
-            cp "$PKG_DIR/Makefile" "$PKG_DIR/Makefile.bak"
-            sed -i 's/^PKG_VERSION:=\(.*\)-\(.*\)/PKG_VERSION:=\1_\2/' "$PKG_DIR/Makefile"
-            echo "=== Fixed Makefile version lines ==="
-            grep -E "^PKG_VERSION|^PKG_RELEASE" "$PKG_DIR/Makefile" || true
-          fi
+          git clone --depth=1 https://github.com/kiddin9/op-packages.git /tmp/op-packages
+          cp -r /tmp/op-packages/luci-app-ap-modem/* openwrt-sdk/package/luci-app-ap-modem/
+          rm -rf /tmp/op-packages
 
       - name: Build package
         working-directory: openwrt-sdk
@@ -81,47 +54,19 @@ jobs:
           make defconfig
           make package/luci-app-ap-modem/compile V=s || true
 
-      - name: Debug - List all built packages
-        shell: bash
-        run: |
-          echo "=== Searching for any package files (.ipk or .apk) ==="
-          find openwrt-sdk/bin -type f \( -name "*.ipk" -o -name "*.apk" \) 2>/dev/null | head -50 || echo "No packages found"
-          echo ""
-          echo "=== Bin directory structure ==="
-          find openwrt-sdk/bin -maxdepth 4 -type d 2>/dev/null | head -30
-
-      - name: Find and copy ap-modem packages
+      - name: Copy packages to staging
         shell: bash
         run: |
           shopt -s globstar
           mkdir -p packages-staging/${{ matrix.name }}
-          
-          PATTERNS=(
-            "*ap-modem*"
-            "*ap_modem*"
-            "*modem*"
-            "*luci-app-ap*"
-            "*luci-app-modem*"
-          )
-          
-          for pattern in "${PATTERNS[@]}"; do
-            find openwrt-sdk/bin -type f -name "$pattern.ipk" 2>/dev/null | while read -r file; do
-              cp -v "$file" packages-staging/${{ matrix.name }}/
-            done
-            find openwrt-sdk/bin -type f -name "$pattern.apk" 2>/dev/null | while read -r file; do
-              cp -v "$file" packages-staging/${{ matrix.name }}/
-            done
-          done
-          
-          if [ ! "$(ls -A packages-staging/${{ matrix.name }} 2>/dev/null)" ]; then
-            echo "⚠️ No ap-modem packages found! Copying ALL packages for debugging..."
-            find openwrt-sdk/bin -type f \( -name "*.ipk" -o -name "*.apk" \) -exec cp -v {} packages-staging/${{ matrix.name }}/ \; 2>/dev/null || true
-          fi
-          
-          echo "=== Files in staging ==="
-          ls -la packages-staging/${{ matrix.name }}/
+          find openwrt-sdk/bin/packages -type f \( \
+            -name "luci-app-ap-modem*.ipk" -o \
+            -name "luci-app-ap-modem*.apk" -o \
+            -name "luci-i18n-ap-modem*.ipk" -o \
+            -name "luci-i18n-ap-modem*.apk" \
+            \) -exec cp -v {} packages-staging/${{ matrix.name }}/ \;
 
-      - name: Upload artifacts
+      - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
           name: packages-staging-${{ matrix.name }}
@@ -132,8 +77,8 @@ jobs:
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "luci-app-ap-modem-${{ matrix.name }}"
-          name: "luci-app-ap-modem - ${{ matrix.name }}"
+          tag_name: "luci-app-ap-modem"
+          name: "luci-app-ap-modem"
           draft: false
           prerelease: false
           files: packages-staging/${{ matrix.name }}/*
