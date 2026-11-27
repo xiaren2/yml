@@ -1,0 +1,94 @@
+name: Build luci-app-ap-modem Multi-Arch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-multi-arch:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: "qualcommax-ipq60xx-snapshot"
+            sdk_url: "https://mirror-03.infra.openwrt.org/snapshots/targets/qualcommax/ipq60xx/openwrt-sdk-qualcommax-ipq60xx_gcc-14.4.0_musl.Linux-x86_64.tar.zst"
+            extract_cmd: "tar -I zstd -xf"
+          - name: "mediatek-filogic-23.05.0"
+            sdk_url: "https://downloads.openwrt.org/releases/23.05.0/targets/mediatek/filogic/openwrt-sdk-23.05.0-mediatek-filogic_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+            extract_cmd: "tar -xJf"
+
+    name: Build luci-app-ap-modem (${{ matrix.name }})
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ccache fastjar file g++ gawk gettext git libelf-dev \
+            libncurses5-dev libncursesw5-dev libssl-dev python3 python3-pip \
+            python3-setuptools rsync unzip wget zlib1g-dev xz-utils zstd
+
+      - name: Download and extract OpenWrt SDK
+        run: |
+          wget ${{ matrix.sdk_url }} -O sdk-archive
+          ${{ matrix.extract_cmd }} sdk-archive
+          SDK_DIR=$(tar -tf sdk-archive | head -1 | cut -f1 -d"/")
+          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
+          mv "$SDK_DIR" openwrt-sdk
+
+      # ✅ 关键改动：用 sparse checkout 只拉取 luci-app-ap-modem 子目录
+      - name: Checkout luci-app-ap-modem subdirectory
+        run: |
+          mkdir -p openwrt-sdk/package/luci-app-ap-modem
+          cd openwrt-sdk/package/luci-app-ap-modem
+          
+          # 初始化 git 仓库并做 sparse checkout
+          git init
+          git remote add origin https://github.com/kiddin9/op-packages.git
+          git config core.sparseCheckout true
+          
+          # 只 checkout luci-app-ap-modem 目录及其父路径（Makefile 在子目录内）
+          echo "luci-app-ap-modem" >> .git/info/sparse-checkout
+          
+          git pull --depth 1 origin main
+
+      - name: Build package
+        working-directory: openwrt-sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+          make package/luci-app-ap-modem/compile V=s || true
+
+      - name: Find and copy built packages
+        shell: bash
+        run: |
+          shopt -s globstar
+          mkdir -p packages-staging/${{ matrix.name }}
+          find openwrt-sdk/bin -type f \( -name "*ap-modem*" \) -exec cp -v {} packages-staging/${{ matrix.name }}/ \;
+          if [ -z "$(ls -A packages-staging/${{ matrix.name }})" ]; then
+            echo "⚠️ No ap-modem packages found! Listing bin directory..."
+            ls -R openwrt-sdk/bin/ | head -50
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-staging-${{ matrix.name }}
+          path: packages-staging/${{ matrix.name }}/
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "luci-app-ap-modem-${{ matrix.name }}"
+          name: "luci-app-ap-modem - ${{ matrix.name }}"
+          draft: false
+          prerelease: false
+          files: packages-staging/${{ matrix.name }}/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
