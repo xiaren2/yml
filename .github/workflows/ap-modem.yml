@@ -16,8 +16,9 @@ jobs:
           - name: "qualcommax-ipq60xx-snapshot"
             sdk_url: "https://mirror-03.infra.openwrt.org/snapshots/targets/qualcommax/ipq60xx/openwrt-sdk-qualcommax-ipq60xx_gcc-15.3.0_musl.Linux-x86_64.tar.zst"
             extract_cmd: "tar -I zstd -xf"
-          - name: "mediatek-filogic-23.05.0"
-            sdk_url: "https://downloads.openwrt.org/releases/23.05.0/targets/mediatek/filogic/openwrt-sdk-23.05.0-mediatek-filogic_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+          - name: "mediatek-filogic-24.10.0"
+            # ✅ 换成 24.10.0，不需要 FORCE=1 了
+            sdk_url: "https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic/openwrt-toolchain-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
             extract_cmd: "tar -xJf"
 
     name: Build luci-app-ap-modem (${{ matrix.name }})
@@ -71,13 +72,12 @@ jobs:
             grep -E "^PKG_VERSION|^PKG_RELEASE" "$PKG_DIR/Makefile" || true
           fi
 
-      - name: Configure and build package
+      - name: Build package
         working-directory: openwrt-sdk
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # ✅ FORCE=1 放在 defconfig 这里，跳过 GNU install 检查
-          make defconfig FORCE=1
+          make defconfig
           make package/luci-app-ap-modem/compile V=s || true
 
       - name: Debug - List all built packages
