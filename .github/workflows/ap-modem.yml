@@ -14,7 +14,6 @@ jobs:
       matrix:
         include:
           - name: "qualcommax-ipq60xx-snapshot"
-            # ✅ 改为 GCC 15.3.0 的 snapshot SDK
             sdk_url: "https://mirror-03.infra.openwrt.org/snapshots/targets/qualcommax/ipq60xx/openwrt-sdk-qualcommax-ipq60xx_gcc-15.3.0_musl.Linux-x86_64.tar.zst"
             extract_cmd: "tar -I zstd -xf"
           - name: "mediatek-filogic-23.05.0"
@@ -24,6 +23,13 @@ jobs:
     name: Build luci-app-ap-modem (${{ matrix.name }})
 
     steps:
+      - name: Free disk space
+        run: |
+          df -h
+          sudo apt-get clean
+          docker system prune -af --volumes || true
+          df -h
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -35,20 +41,25 @@ jobs:
       - name: Download and extract OpenWrt SDK
         run: |
           wget ${{ matrix.sdk_url }} -O sdk-archive
-          ${{ matrix.extract_cmd }} sdk-archive
-          SDK_DIR=$(tar -tf sdk-archive | head -1 | cut -f1 -d"/")
-          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
-          mv "$SDK_DIR" openwrt-sdk
+          # 先检查文件完整性
+          file sdk-archive
+          ls -lh sdk-archive
+          # 直接解压到目标目录，避免管道问题
+          mkdir -p openwrt-sdk
+          ${{ matrix.extract_cmd }} sdk-archive -C openwrt-sdk --strip-components=1
+          echo "SDK extracted successfully"
+          ls -la openwrt-sdk/
 
-      - name: Checkout luci-app-ap-modem subdirectory
+      - name: Checkout luci-app-ap-modem from kiddin9/op-packages
         run: |
           mkdir -p openwrt-sdk/package/luci-app-ap-modem
           cd openwrt-sdk/package/luci-app-ap-modem
           git init
           git remote add origin https://github.com/kiddin9/op-packages.git
           git config core.sparseCheckout true
-          echo "luci-app-ap-modem" >> .git/info/sparse-checkout
-          git pull --depth 1 origin master   # 注意：有些分支叫 master，有些叫 main
+          echo "luci-app-ap-modem" > .git/info/sparse-checkout
+          # ✅ 关键修复：kiddin9/op-packages 的主分支是 main，不是 master
+          git pull --depth 1 origin main
 
       - name: Build package
         working-directory: openwrt-sdk
@@ -58,36 +69,57 @@ jobs:
           make defconfig
           make package/luci-app-ap-modem/compile V=s || true
 
-      - name: Debug - List bin directory structure
+      - name: Debug - List all built packages
         shell: bash
         run: |
-          echo "=== Searching for ap-modem ipk ==="
-          find openwrt-sdk/bin -type f -name "*.ipk" -o -name "*.apk" | head -30 || echo "No ipk found at all"
-          echo "=== Full bin tree (first 3 levels) ==="
-          find openwrt-sdk/bin -maxdepth 3 -type d | head -30
+          echo "=== Searching for any ipk/apk files ==="
+          find openwrt-sdk/bin -type f \( -name "*.ipk" -o -name "*.apk" \) 2>/dev/null | head -50 || echo "No packages found"
+          echo ""
+          echo "=== Bin directory structure ==="
+          find openwrt-sdk/bin -maxdepth 4 -type d 2>/dev/null | head -30
 
-      - name: Find and copy built packages
+      - name: Find and copy ap-modem packages
         shell: bash
         run: |
           shopt -s globstar
           mkdir -p packages-staging/${{ matrix.name }}
-          # 放宽匹配规则
-          find openwrt-sdk/bin -type f \( -name "*ap-modem*" -o -name "*ap_modem*" -o -name "*modem*" \) -exec cp -v {} packages-staging/${{ matrix.name }}/ \; || true
-          # 如果还是没找到，把整个 packages 目录复制出来供排查
-          if [ -z "$(ls -A packages-staging/${{ matrix.name }} 2>/dev/null)" ]; then
-            echo "⚠️ No modem packages found! Copying entire packages dir for debugging..."
-            mkdir -p packages-staging/${{ matrix.name }}/debug
-            find openwrt-sdk/bin/packages -type f -name "*.ipk" -exec cp {} packages-staging/${{ matrix.name }}/debug/ \; || true
+          
+          # 多种可能的命名模式
+          PATTERNS=(
+            "*ap-modem*"
+            "*ap_modem*"
+            "*modem*"
+            "*luci-app-ap*"
+            "*luci-app-modem*"
+          )
+          
+          FOUND=false
+          for pattern in "${PATTERNS[@]}"; do
+            results=$(find openwrt-sdk/bin -type f -name "$pattern" 2>/dev/null)
+            if [ -n "$results" ]; then
+              echo "$results" | while read -r file; do
+                cp -v "$file" packages-staging/${{ matrix.name }}/
+                FOUND=true
+              done
+            fi
+          done
+          
+          # 如果没找到特定包，复制所有包用于调试
+          if [ ! "$(ls -A packages-staging/${{ matrix.name }} 2>/dev/null)" ]; then
+            echo "⚠️ No ap-modem packages found! Copying ALL ipk for debugging..."
+            find openwrt-sdk/bin -type f -name "*.ipk" -exec cp -v {} packages-staging/${{ matrix.name }}/ \; 2>/dev/null || true
           fi
+          
+          echo "=== Files in staging ==="
+          ls -la packages-staging/${{ matrix.name }}/
 
-      # ✅ 改为 warn 级别，避免因没找到文件就炸掉整个 workflow
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: packages-staging-${{ matrix.name }}
           path: packages-staging/${{ matrix.name }}/
           retention-days: 3
-          if-no-files-found: warn   # 改为 warn，不要 error
+          if-no-files-found: warn
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
