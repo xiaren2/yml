@@ -37,7 +37,7 @@ jobs:
             build-essential ccache fastjar file g++ gawk gettext git libelf-dev \
             libncurses5-dev libncursesw5-dev libssl-dev python3 python3-pip \
             python3-setuptools rsync unzip wget zlib1g-dev xz-utils zstd \
-            coreutils  # ✅ 添加 coreutils 提供 GNU install 命令
+            coreutils
 
       - name: Download and extract OpenWrt SDK
         run: |
@@ -59,13 +59,34 @@ jobs:
           echo "luci-app-ap-modem" > .git/info/sparse-checkout
           git pull --depth 1 origin main
 
+      - name: Fix version format for snapshot SDK (apk compatibility)
+        shell: bash
+        run: |
+          # 检查 Makefile 中的版本号，如果包含连字符则替换为下划线
+          PKG_DIR="openwrt-sdk/package/luci-app-ap-modem/luci-app-ap-modem"
+          if [ -f "$PKG_DIR/Makefile" ]; then
+            echo "=== Original Makefile version lines ==="
+            grep -E "^PKG_VERSION|^PKG_RELEASE" "$PKG_DIR/Makefile" || true
+            
+            # 备份原文件
+            cp "$PKG_DIR/Makefile" "$PKG_DIR/Makefile.bak"
+            
+            # 将 PKG_VERSION 中的连字符替换为下划线（新版 apk 不支持版本号中的连字符）
+            sed -i 's/^PKG_VERSION:=\(.*\)-\(.*\)/PKG_VERSION:=\1_\2/' "$PKG_DIR/Makefile"
+            
+            echo "=== Fixed Makefile version lines ==="
+            grep -E "^PKG_VERSION|^PKG_RELEASE" "$PKG_DIR/Makefile" || true
+          fi
+
       - name: Build package
         working-directory: openwrt-sdk
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           make defconfig
-          make package/luci-app-ap-modem/compile V=s || true
+          # ✅ 23.05.0 用 FORCE=1 跳过 GNU install 检查
+          # ✅ snapshot 版也能正常处理
+          make package/luci-app-ap-modem/compile V=s FORCE=1 || true
 
       - name: Debug - List all built packages
         shell: bash
@@ -82,7 +103,6 @@ jobs:
           shopt -s globstar
           mkdir -p packages-staging/${{ matrix.name }}
           
-          # ✅ 同时搜索 .ipk 和 .apk 格式
           PATTERNS=(
             "*ap-modem*"
             "*ap_modem*"
@@ -92,17 +112,14 @@ jobs:
           )
           
           for pattern in "${PATTERNS[@]}"; do
-            # 搜索 .ipk 文件
             find openwrt-sdk/bin -type f -name "$pattern.ipk" 2>/dev/null | while read -r file; do
               cp -v "$file" packages-staging/${{ matrix.name }}/
             done
-            # 搜索 .apk 文件
             find openwrt-sdk/bin -type f -name "$pattern.apk" 2>/dev/null | while read -r file; do
               cp -v "$file" packages-staging/${{ matrix.name }}/
             done
           done
           
-          # 如果没找到，复制所有包用于调试
           if [ ! "$(ls -A packages-staging/${{ matrix.name }} 2>/dev/null)" ]; then
             echo "⚠️ No ap-modem packages found! Copying ALL packages for debugging..."
             find openwrt-sdk/bin -type f \( -name "*.ipk" -o -name "*.apk" \) -exec cp -v {} packages-staging/${{ matrix.name }}/ \; 2>/dev/null || true
