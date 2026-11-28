@@ -9,8 +9,9 @@ permissions:
 
 jobs:
   build-multi-arch:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest          # 想最省心可改成 ubuntu-24.04（GNU coreutils）
     strategy:
+      fail-fast: false              # 两个架构互不影响，一个挂别取消另一个
       matrix:
         include:
           - name: "qualcommax-ipq60xx-snapshot"
@@ -38,13 +39,42 @@ jobs:
           SDK_DIR=$(tar -tf sdk-archive | head -1 | cut -f1 -d"/")
           mv "$SDK_DIR" openwrt-sdk
 
-      # ★ 唯一改动：clone 别人仓库，取 luci-app-ap-modem 子目录
-      - name: Prepare package (from dotywrt/dotycat-package)
+      # 修复1：让旧版 SDK 的 prereq 也接受 uutils coreutils（Ubuntu 26.04+ 默认）
+      - name: Patch prereq to accept uutils coreutils
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("openwrt-sdk/include/prereq-build.mk")
+          s = p.read_text()
+          s = re.sub(r"install --version \| grep GNU,",
+                     "install --version | grep 'GNU\\|uutils',", s)
+          p.write_text(s)
+          print("patched prereq-build.mk")
+          PY
+
+      - name: Prepare package (from kiddin9/op-packages)
         run: |
           mkdir -p openwrt-sdk/package/luci-app-ap-modem
           git clone --depth=1 https://github.com/kiddin9/op-packages.git /tmp/op-packages
           cp -r /tmp/op-packages/luci-app-ap-modem/* openwrt-sdk/package/luci-app-ap-modem/
           rm -rf /tmp/op-packages
+
+      # 修复2：PKG_VERSION 里的 '-' 会让 apk 版本校验失败，统一替换成 '.'
+      - name: Sanitize package version for apk
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("openwrt-sdk/package/luci-app-ap-modem/Makefile")
+          s = p.read_text()
+          m = re.search(r'^PKG_VERSION:=\s*(.+)$', s, re.M)
+          if m:
+            old = m.group(1).strip()
+            new = old.replace('-', '.')
+            if new != old:
+              s = s[:m.start(1)] + new + s[m.end(1):]
+              p.write_text(s)
+              print(f"PKG_VERSION: {old} -> {new}")
+          PY
 
       - name: Build package
         working-directory: openwrt-sdk
@@ -52,7 +82,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           make defconfig
-          make package/luci-app-ap-modem/compile V=s || true
+          make package/luci-app-ap-modem/compile V=s   # 去掉了 || true，编译真挂了会红
 
       - name: Copy packages to staging
         shell: bash
