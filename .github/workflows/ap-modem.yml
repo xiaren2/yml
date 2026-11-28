@@ -9,9 +9,9 @@ permissions:
 
 jobs:
   build-multi-arch:
-    runs-on: ubuntu-latest          # 想最省心可改成 ubuntu-24.04（GNU coreutils）
+    runs-on: ubuntu-latest          # 想最省心可改 ubuntu-24.04（GNU coreutils + 旧 gcc）
     strategy:
-      fail-fast: false              # 两个架构互不影响，一个挂别取消另一个
+      fail-fast: false
       matrix:
         include:
           - name: "qualcommax-ipq60xx-snapshot"
@@ -39,7 +39,7 @@ jobs:
           SDK_DIR=$(tar -tf sdk-archive | head -1 | cut -f1 -d"/")
           mv "$SDK_DIR" openwrt-sdk
 
-      # 修复1：让旧版 SDK 的 prereq 也接受 uutils coreutils（Ubuntu 26.04+ 默认）
+      # 修复1：旧版 SDK prereq 只认 GNU install，让它也接受 uutils（Ubuntu 26.04+）
       - name: Patch prereq to accept uutils coreutils
         run: |
           python3 - <<'PY'
@@ -52,6 +52,15 @@ jobs:
           print("patched prereq-build.mk")
           PY
 
+      # 修复2：Ubuntu 26.04 的 gcc 默认 C23，旧 luci 的 K&R 声明会冲突；
+      #        放一个 cc 包装器，给主机端编译统一加 -std=gnu17
+      - name: Wrap host cc with -std=gnu17 (C23 workaround)
+        run: |
+          mkdir -p /tmp/ccwrap
+          printf '#!/bin/sh\nexec /usr/bin/cc -std=gnu17 "$@"\n' > /tmp/ccwrap/cc
+          chmod +x /tmp/ccwrap/cc
+          /tmp/ccwrap/cc --version | head -1
+
       - name: Prepare package (from kiddin9/op-packages)
         run: |
           mkdir -p openwrt-sdk/package/luci-app-ap-modem
@@ -59,7 +68,8 @@ jobs:
           cp -r /tmp/op-packages/luci-app-ap-modem/* openwrt-sdk/package/luci-app-ap-modem/
           rm -rf /tmp/op-packages
 
-      # 修复2：PKG_VERSION 里的 '-' 会让 apk 版本校验失败，统一替换成 '.'
+      # 修复3：apk 版本号里点号后必须跟数字，且版本体内不能含 '-'
+      #        1.0.5-r20241208 -> 1.0.5.20241208  （最终 1.0.5.20241208-r3）
       - name: Sanitize package version for apk
         run: |
           python3 - <<'PY'
@@ -69,7 +79,7 @@ jobs:
           m = re.search(r'^PKG_VERSION:=\s*(.+)$', s, re.M)
           if m:
             old = m.group(1).strip()
-            new = old.replace('-', '.')
+            new = old.replace('-r', '.').replace('-', '.')
             if new != old:
               s = s[:m.start(1)] + new + s[m.end(1):]
               p.write_text(s)
@@ -79,10 +89,11 @@ jobs:
       - name: Build package
         working-directory: openwrt-sdk
         run: |
+          export PATH=/tmp/ccwrap:$PATH
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           make defconfig
-          make package/luci-app-ap-modem/compile V=s   # 去掉了 || true，编译真挂了会红
+          make package/luci-app-ap-modem/compile V=s
 
       - name: Copy packages to staging
         shell: bash
